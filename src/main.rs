@@ -3,11 +3,14 @@ use std::fmt::Display;
 
 use chrono::prelude::*;
 use clap::{self, Parser, Subcommand};
+use prettytable::Table;
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::Migrator;
 use uuid::Uuid;
 
+use rustodo::gui;
 static _MIGRATOR: Migrator = sqlx::migrate!();
+
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -18,7 +21,8 @@ struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
     New {
-        text: String,
+        /// if there is no string, open an editor?
+        text: Option<String>,
     },
     List,
     Complete {
@@ -29,6 +33,7 @@ enum Command {
         search_string: String,
         max_nb_entries: Option<usize>,
     },
+    Visual,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,83 +44,38 @@ struct TodoRecord {
     text: String,
 }
 
-struct Todos(Vec<TodoRecord>);
-
-struct DisplayableTodoList {
+struct DisplayTable {
     todos: Vec<TodoRecord>,
-    /// in number of characters. truncates past this lenght.
-    max_column_length: Option<usize>,
-    /// in number of characters.
-    /// overrides max_column_length for the `text` field if set.
-    truncate_text_at: Option<usize>,
+    // / in number of characters. truncates past this lenght.
+    // max_column_length: Option<usize>,
+    // / in number of characters.
+    // / overrides max_column_length for the `text` field if set.
+    // truncate_text_at: Option<usize>,
 }
 
-impl Display for DisplayableTodoList {
+impl Display for DisplayTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn field_length(s: &[String]) -> Option<usize> {
-            s.iter().map(|s| s.len()).max()
+        let mut table = Table::new();
+        table.set_format(*prettytable::format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
+        table.set_titles(prettytable::row!["id", "text", "done", "date"]);
+        for TodoRecord {
+            id,
+            text,
+            done,
+            date,
+        } in &self.todos
+        {
+            table.add_row(prettytable::row![
+                id.to_string(),
+                text.chars()
+                    .take(13)
+                    .chain("...".chars())
+                    .collect::<String>(),
+                done.then_some("[X]").unwrap_or("[ ]"),
+                date.to_string(),
+            ]);
         }
-        fn tmpname(todos: &[TodoRecord]) -> Option<()> {
-            let id_cl = field_length(todos.iter().map(|t| t.id.to_string()).collect::<Vec<_>>().as_slice())?;
-            Some(())
-        }
-        let id_column_length = self
-            .todos
-            .iter()
-            .map(|t| &t.id)
-            .map(|id| id.to_string())
-            .map(|s| s.len())
-            .max();
-        let text_column_length = self
-            .todos
-            .iter()
-            .map(|t| &t.text)
-            .map(|s|s.len())
-            .max()
-            .min(self.truncate_text_at);
-        unimplemented!()
-    }
-}
-
-impl Display for Todos {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const FIELD_LENGTH: usize = 8;
-        fn field_fmt(str: &str) -> String {
-            match str.len() {
-                FIELD_LENGTH => str.to_owned(),
-                FIELD_LENGTH.. => {
-                    let mut str = str.to_owned();
-                    str.truncate(FIELD_LENGTH - 3);
-                    format!("{str}...")
-                }
-                _ => format!("{str: >FIELD_LENGTH$}"),
-            }
-        }
-
-        fn todo_fmt(todo: &TodoRecord) -> String {
-            let id = field_fmt(&todo.id.to_string());
-            let text = field_fmt(&todo.text);
-            let done = todo.done.then_some("X").unwrap_or(" ");
-            let date = field_fmt(&todo.date.to_string());
-            format!("|{id} {text}  [{done}]   {date}|")
-        }
-
-        write!(
-            f,
-            "
-|{id: ^FIELD_LENGTH$}|{text: ^FIELD_LENGTH$}|{done: ^6}|{date: ^FIELD_LENGTH$}|
-|{s}|{s}|------|{s}|
-            ",
-            id = "id",
-            text = "text",
-            done = "done",
-            date = "date",
-            s = "-".repeat(8)
-        )?;
-        for todo in &self.0 {
-            writeln!(f, "{}", todo_fmt(&todo))?;
-        }
-        Ok(())
+        write!(f, "{table}")
     }
 }
 
@@ -127,12 +87,12 @@ async fn main() -> Result<(), MainError> {
         &std::env::var("DATABASE_URL").expect("env variable `DATABASE_URL` not set."),
     )
     .await?;
-
     use Command::*;
     match cli.subcommand {
         New { text } => {
             let uuid = Uuid::new_v4();
             let time = Utc::now();
+            let text = text.unwrap_or_else(|| "editor!".to_owned() );
             sqlx::query!(
                 r#"
                 INSERT INTO todos (id, text, done, date)
@@ -159,7 +119,7 @@ async fn main() -> Result<(), MainError> {
             )
             .fetch_all(&db)
             .await?;
-            println!("{}", Todos(todos));
+            println!("{}", DisplayTable { todos });
         }
         Complete { id, completed } => {
             let completedness = completed.unwrap_or(false);
@@ -205,7 +165,10 @@ async fn main() -> Result<(), MainError> {
                 }
             }
 
-            println!("{}", Todos(results));
+            println!("{}", DisplayTable { todos: results });
+        }
+        Visual => {
+            gui::start(db)?;
         }
     };
     Ok(())
@@ -215,4 +178,6 @@ async fn main() -> Result<(), MainError> {
 enum MainError {
     #[error("Sqlx error: {0}")]
     SqlxError(#[from] sqlx::Error),
+    #[error("GuiError: {0}")]
+    GuiError(#[from] gui::GuiError),
 }
