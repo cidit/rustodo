@@ -1,4 +1,5 @@
 use futures_util::stream::TryStreamExt;
+use ratatui::style::Stylize;
 use std::fmt::Display;
 
 use chrono::prelude::*;
@@ -10,7 +11,6 @@ use uuid::Uuid;
 
 use rustodo::gui;
 static _MIGRATOR: Migrator = sqlx::migrate!();
-
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -26,14 +26,14 @@ enum Command {
     },
     List,
     Complete {
-        id: i64,
+        id: String,
         completed: Option<bool>,
     },
     Search {
         search_string: String,
         max_nb_entries: Option<usize>,
     },
-    Visual,
+    OpenView,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,12 +66,18 @@ impl Display for DisplayTable {
         } in &self.todos
         {
             table.add_row(prettytable::row![
-                id.to_string(),
+                id.to_string()
+                    // .chars()
+                    // .take(8)
+                    // .collect::<String>()
+                    .on_green()
+                    .bold()
+                    .content,
                 text.chars()
                     .take(13)
                     .chain("...".chars())
                     .collect::<String>(),
-                done.then_some("[X]").unwrap_or("[ ]"),
+                if *done { "[X]" } else { "[ ]" },
                 date.to_string(),
             ]);
         }
@@ -83,7 +89,7 @@ impl Display for DisplayTable {
 async fn main() -> Result<(), MainError> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
-    let db = sqlx::SqlitePool::connect(
+    let db_client = sqlx::SqlitePool::connect(
         &std::env::var("DATABASE_URL").expect("env variable `DATABASE_URL` not set."),
     )
     .await?;
@@ -92,7 +98,7 @@ async fn main() -> Result<(), MainError> {
         New { text } => {
             let uuid = Uuid::new_v4();
             let time = Utc::now();
-            let text = text.unwrap_or_else(|| "editor!".to_owned() );
+            let text = text.unwrap_or_else(|| "editor!".to_owned());
             sqlx::query!(
                 r#"
                 INSERT INTO todos (id, text, done, date)
@@ -103,7 +109,7 @@ async fn main() -> Result<(), MainError> {
                 false,
                 time,
             )
-            .execute(&db)
+            .execute(&db_client)
             .await?;
         }
         List => {
@@ -117,23 +123,23 @@ async fn main() -> Result<(), MainError> {
                 FROM todos
                 "#
             )
-            .fetch_all(&db)
+            .fetch_all(&db_client)
             .await?;
             println!("{}", DisplayTable { todos });
         }
         Complete { id, completed } => {
             let completedness = completed.unwrap_or(false);
-
+            let condition = format!("%{id}%");
             sqlx::query!(
                 r#"
                 UPDATE todos
                 SET done = ?
-                WHERE id = ?
+                WHERE id LIKE ?
                 "#,
                 completedness,
-                id,
+                condition,
             )
-            .execute(&db)
+            .execute(&db_client)
             .await?;
         }
         Search {
@@ -151,7 +157,7 @@ async fn main() -> Result<(), MainError> {
                 FROM todos
                 "#,
             )
-            .fetch(&db);
+            .fetch(&db_client);
 
             while let Some(todo) = db_cursor.try_next().await? {
                 if format!("{todo:?}").contains(&search_string) {
@@ -167,8 +173,8 @@ async fn main() -> Result<(), MainError> {
 
             println!("{}", DisplayTable { todos: results });
         }
-        Visual => {
-            gui::start(db)?;
+        OpenView => {
+            gui::start(db_client)?;
         }
     };
     Ok(())
