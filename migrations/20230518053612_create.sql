@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS todos (
     text  TEXT       NOT NULL,
     done  BOOLEAN    NOT NULL,
     date  DATETIME   NOT NULL,
-    archived UUID,
+    replaced_by UUID
 );

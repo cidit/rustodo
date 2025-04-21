@@ -36,83 +36,11 @@ enum Command {
         max_nb_entries: Option<usize>,
     },
     OpenView,
-}
-
-#[derive(Ord, PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
-enum Archival {
-    Yes,
-    No,
-    Replaced(Uuid),
-}
-
-impl Display for Archival {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-#[derive(Clone, Debug, thiserror::Error)]
-#[error("couldn't deserialize")]
-struct DeserializationErr;
-
-impl std::str::FromStr for Archival {
-    type Err = DeserializationErr;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "Yes" => Ok(Self::Yes),
-            "No" => Ok(Self::No),
-            other => {
-                if other.starts_with("Replaced") {
-                    let rest = other.trim_start_matches("Replaced");
-                    let uuid = &rest[1..rest.len() - 1];
-                    let uuid = Uuid::from_str(uuid).map_err(|_| DeserializationErr)?;
-                    return Ok(Self::Replaced(uuid));
-                }
-                return Err(DeserializationErr);
-            }
-        }
-    }
-}
-
-impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Archival
-where
-    &'r str: sqlx::Decode<'r, sqlx::Sqlite>,
-{
-    fn decode(
-        value: <sqlx::Sqlite as sqlx::database::HasValueRef<'r>>::ValueRef,
-    ) -> Result<Self, sqlx::error::BoxDynError> {
-        let s = String::decode(value)?;
-        Ok(s.parse()?)
-    }
-}
-
-impl<'r> sqlx::Encode<'r, sqlx::Sqlite> for Archival {
-    fn encode_by_ref(
-        &self,
-        buf: &mut <sqlx::Sqlite as sqlx::database::HasArguments<'r>>::ArgumentBuffer, //: &mut <DB as sqlx::database::HasArguments<'r>>::ArgumentBuffer,
-    ) -> sqlx::encode::IsNull {
-        let displayed = self.to_string();
-        displayed.encode(buf)
-    }
-}
-
-impl PartialOrd for Archival {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        let priority = |arch: &Self| match arch {
-            Self::Yes => 3,
-            Self::Replaced(_) => 2,
-            Self::No => 1,
-        };
-
-        Some(priority(self).cmp(&priority(other)))
-    }
-}
-
-impl sqlx::Type<sqlx::Sqlite> for Archival {
-    fn type_info() -> <sqlx::Sqlite as sqlx::Database>::TypeInfo {
-        String::type_info()
-    }
+    /// this branch archived the old note by replacing it with a new note
+    Edit {
+        id: Uuid,
+        text: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,7 +49,7 @@ struct TodoRecord {
     done: bool,
     id: Uuid,
     text: String,
-    archived: Option<Uuid>,
+    replaced_by: Option<Uuid>,
 }
 
 struct DisplayTable {
@@ -143,12 +71,12 @@ impl Display for DisplayTable {
             text,
             done,
             date,
-            archived,
+            replaced_by,
         } in self
             .todos
             .iter()
             .sorted_by_key(|&tr| tr.date)
-            .sorted_by_key(|&tr| tr.archived.clone())
+            .sorted_by_key(|&tr| tr.replaced_by.clone())
         // .sort_by(|s, o| {std::cmp::Ordering::Less})
         {
             table.add_row(prettytable::row![
@@ -166,7 +94,7 @@ impl Display for DisplayTable {
                     .collect::<String>(),
                 // .strikethrough(),
                 date.date_naive().to_string(),
-                archived.map_or("No".to_owned(), |uuid| uuid.to_string())
+                replaced_by.map_or("No".to_owned(), |uuid| uuid.to_string())
             ]);
         }
         write!(f, "{table}")
@@ -189,14 +117,13 @@ async fn main() -> Result<(), MainError> {
             let text = text.unwrap_or_else(|| "editor!".to_owned());
             sqlx::query!(
                 r#"
-                INSERT INTO todos (id, text, done, date, archived)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO todos (id, text, done, date)
+                VALUES (?, ?, ?, ?)
                 "#,
                 uuid,
                 text,
                 false,
                 time,
-                Archival::No,
             )
             .execute(&db_client)
             .await?;
@@ -209,7 +136,7 @@ async fn main() -> Result<(), MainError> {
                         text, 
                         done, 
                         date as "date: DateTime<Utc>",
-                        archived as "archived: Archival"
+                        replaced_by as "replaced_by: Uuid"
                 FROM todos
                 "#
             )
@@ -218,7 +145,7 @@ async fn main() -> Result<(), MainError> {
             println!("{}", DisplayTable { todos });
         }
         Complete { id, completed } => {
-            let completedness = completed.unwrap_or(false);
+            let completedness = completed.unwrap_or(true);
             // let condition = format!("%{id}%");
             sqlx::query!(
                 r#"
@@ -245,7 +172,7 @@ async fn main() -> Result<(), MainError> {
                         done, 
                         text, 
                         date as "date: DateTime<Utc>",
-                        archived as "archived: Archival"
+                        replaced_by as "replaced_by: Uuid"
                 FROM todos
                 "#,
             )
@@ -268,6 +195,7 @@ async fn main() -> Result<(), MainError> {
         OpenView => {
             gui::start(db_client)?;
         }
+        Edit { id, text } => {}
     };
     Ok(())
 }
